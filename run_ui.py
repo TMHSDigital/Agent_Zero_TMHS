@@ -22,8 +22,9 @@ from python.helpers.defer import DeferredTask
 
 # Set the new timezone to 'UTC'
 os.environ["TZ"] = "UTC"
-# Apply the timezone change
-time.tzset()
+# Apply the timezone change - only on Unix-like systems
+if hasattr(time, 'tzset'):
+    time.tzset()
 
 # initialize the internal Flask server
 app = Flask("app", static_folder=get_abs_path("./webui"), static_url_path="/")
