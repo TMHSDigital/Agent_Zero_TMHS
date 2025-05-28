@@ -459,20 +459,23 @@ def convert_out(settings: Settings) -> SettingsOutput:
     api_keys_fields.append(
         _get_api_key_field(settings, "anthropic", "Anthropic API Key")
     )
-    api_keys_fields.append(_get_api_key_field(settings, "groq", "Groq API Key"))
-    api_keys_fields.append(_get_api_key_field(settings, "google", "Google API Key"))
-    api_keys_fields.append(_get_api_key_field(settings, "deepseek", "DeepSeek API Key"))
     api_keys_fields.append(
-        _get_api_key_field(settings, "openrouter", "OpenRouter API Key")
+        _get_api_key_field(settings, "chutes", "Chutes API Key")
     )
+    api_keys_fields.append(_get_api_key_field(settings, "deepseek", "DeepSeek API Key"))
+    api_keys_fields.append(_get_api_key_field(settings, "google", "Google API Key"))
+    api_keys_fields.append(_get_api_key_field(settings, "groq", "Groq API Key"))
     api_keys_fields.append(
-        _get_api_key_field(settings, "sambanova", "Sambanova API Key")
+        _get_api_key_field(settings, "huggingface", "HuggingFace API Key")
     )
     api_keys_fields.append(
         _get_api_key_field(settings, "mistralai", "MistralAI API Key")
     )
     api_keys_fields.append(
-        _get_api_key_field(settings, "huggingface", "HuggingFace API Key")
+        _get_api_key_field(settings, "openrouter", "OpenRouter API Key")
+    )
+    api_keys_fields.append(
+        _get_api_key_field(settings, "sambanova", "Sambanova API Key")
     )
 
     api_keys_section: SettingsSection = {
@@ -794,20 +797,20 @@ def get_default_settings() -> Settings:
 
     return Settings(
         chat_model_provider=ModelProvider.OPENAI.name,
-        chat_model_name="gpt-4o",
+        chat_model_name="gpt-4.1",
         chat_model_kwargs={"temperature": "0"},
-        chat_model_ctx_length=120000,
+        chat_model_ctx_length=100000,
         chat_model_ctx_history=0.7,
-        chat_model_vision=False,
+        chat_model_vision=True,
         chat_model_rl_requests=0,
         chat_model_rl_input=0,
         chat_model_rl_output=0,
         util_model_provider=ModelProvider.OPENAI.name,
-        util_model_name="gpt-4o-mini",
-        util_model_ctx_length=120000,
+        util_model_name="gpt-4.1-nano",
+        util_model_ctx_length=100000,
         util_model_ctx_input=0.7,
         util_model_kwargs={"temperature": "0"},
-        util_model_rl_requests=60,
+        util_model_rl_requests=0,
         util_model_rl_input=0,
         util_model_rl_output=0,
         embed_model_provider=ModelProvider.HUGGINGFACE.name,
@@ -816,8 +819,8 @@ def get_default_settings() -> Settings:
         embed_model_rl_requests=0,
         embed_model_rl_input=0,
         browser_model_provider=ModelProvider.OPENAI.name,
-        browser_model_name="gpt-4o",
-        browser_model_vision=False,
+        browser_model_name="gpt-4.1",
+        browser_model_vision=True,
         browser_model_kwargs={"temperature": "0"},
         api_keys={},
         auth_login="",
