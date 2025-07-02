@@ -1,24 +1,23 @@
 import os
+import secrets
 import sys
 import time
 import socket
 import struct
-import asyncio
 from functools import wraps
 import threading
 import signal
-from flask import Flask, request, Response
+from typing import override
+from flask import Flask, request, Response, session
 from flask_basicauth import BasicAuth
-from python.helpers import errors, files, git
+import initialize
+from python.helpers import errors, files, git, mcp_server
 from python.helpers.files import get_abs_path
-from python.helpers import persist_chat, runtime, dotenv, process
-from python.helpers.cloudflare_tunnel import CloudflareTunnel
+from python.helpers import runtime, dotenv, process
 from python.helpers.extract_tools import load_classes_from_folder
 from python.helpers.api import ApiHandler
-from python.helpers.job_loop import run_loop
 from python.helpers.print_style import PrintStyle
-from python.helpers.task_scheduler import TaskScheduler
-from python.helpers.defer import DeferredTask
+
 
 # Set the new timezone to 'UTC'
 os.environ["TZ"] = "UTC"
@@ -27,13 +26,18 @@ if hasattr(time, 'tzset'):
     time.tzset()
 
 # initialize the internal Flask server
-app = Flask("app", static_folder=get_abs_path("./webui"), static_url_path="/")
-app.config["JSON_SORT_KEYS"] = False  # Disable key sorting in jsonify
+webapp = Flask("app", static_folder=get_abs_path("./webui"), static_url_path="/")
+webapp.secret_key = os.getenv("FLASK_SECRET_KEY") or secrets.token_hex(32)
+webapp.config.update(
+    JSON_SORT_KEYS=False,
+    SESSION_COOKIE_SAMESITE="Strict",
+)
+
 
 lock = threading.Lock()
 
-# Set up basic authentication
-basic_auth = BasicAuth(app)
+# Set up basic authentication for UI and API but not MCP
+basic_auth = BasicAuth(webapp)
 
 
 def is_loopback_address(address):
@@ -123,8 +127,20 @@ def requires_auth(f):
     return decorated
 
 
+def csrf_protect(f):
+    @wraps(f)
+    async def decorated(*args, **kwargs):
+        token = session.get("csrf_token")
+        header = request.headers.get("X-CSRF-Token")
+        if not token or not header or token != header:
+            return Response("CSRF token missing or invalid", 403)
+        return await f(*args, **kwargs)
+
+    return decorated
+
+
 # handle default address, load index
-@app.route("/", methods=["GET"])
+@webapp.route("/", methods=["GET"])
 @requires_auth
 async def serve_index():
     gitinfo = None
@@ -148,11 +164,11 @@ def run():
     # Suppress only request logs but keep the startup messages
     from werkzeug.serving import WSGIRequestHandler
     from werkzeug.serving import make_server
-
-    PrintStyle().print("Starting job loop...")
-    job_loop = DeferredTask().start_task(run_loop)
+    from werkzeug.middleware.dispatcher import DispatcherMiddleware
+    from a2wsgi import ASGIMiddleware, WSGIMiddleware
 
     PrintStyle().print("Starting server...")
+
     class NoRequestLoggingWSGIRequestHandler(WSGIRequestHandler):
         def log_request(self, code="-", size="-"):
             pass  # Override to suppress request logging
@@ -162,112 +178,74 @@ def run():
     host = (
         runtime.get_arg("host") or dotenv.get_dotenv_value("WEB_UI_HOST") or "localhost"
     )
-    use_cloudflare = (
-        runtime.get_arg("cloudflare_tunnel")
-        or dotenv.get_dotenv_value("USE_CLOUDFLARE", "false").lower()
-    ) == "true"
-
-    tunnel = None
-
-    try:
-        # Initialize and start Cloudflare tunnel if enabled
-        if use_cloudflare and port:
-            try:
-                tunnel = CloudflareTunnel(port)
-                tunnel.start()
-            except Exception as e:
-                PrintStyle().error(f"Failed to start Cloudflare tunnel: {e}")
-                PrintStyle().print("Continuing without tunnel...")
-
-        # initialize contexts from persisted chats
-        persist_chat.load_tmp_chats()
-        # # reload scheduler
-        # scheduler = TaskScheduler.get()
-        # asyncio.run(scheduler.reload())
-
-    except Exception as e:
-        PrintStyle().error(errors.format_error(e))
-
     server = None
 
     def register_api_handler(app, handler: type[ApiHandler]):
         name = handler.__module__.split(".")[-1]
         instance = handler(app, lock)
 
+        async def handler_wrap():
+            return await instance.handle_request(request=request)
+
         if handler.requires_loopback():
-
-            @requires_loopback
-            async def handle_request():
-                return await instance.handle_request(request=request)
-
-        elif handler.requires_auth():
-
-            @requires_auth
-            async def handle_request():
-                return await instance.handle_request(request=request)
-
-        elif handler.requires_api_key():
-
-            @requires_api_key
-            async def handle_request():
-                return await instance.handle_request(request=request)
-
-        else:
-            # Fallback to requires_auth
-            @requires_auth
-            async def handle_request():
-                return await instance.handle_request(request=request)
+            handler_wrap = requires_loopback(handler_wrap)
+        if handler.requires_auth():
+            handler_wrap = requires_auth(handler_wrap)
+        if handler.requires_api_key():
+            handler_wrap = requires_api_key(handler_wrap)
+        if handler.requires_csrf():
+            handler_wrap = csrf_protect(handler_wrap)
 
         app.add_url_rule(
             f"/{name}",
             f"/{name}",
-            handle_request,
-            methods=["POST", "GET"],
+            handler_wrap,
+            methods=handler.get_methods(),
         )
 
     # initialize and register API handlers
     handlers = load_classes_from_folder("python/api", "*.py", ApiHandler)
     for handler in handlers:
-        register_api_handler(app, handler)
+        register_api_handler(webapp, handler)
 
-    try:
-        server = make_server(
-            host=host,
-            port=port,
-            app=app,
-            request_handler=NoRequestLoggingWSGIRequestHandler,
-            threaded=True,
-        )
+    # add the webapp and mcp to the app
+    app = DispatcherMiddleware(
+        webapp,
+        {
+            "/mcp": ASGIMiddleware(app=mcp_server.DynamicMcpProxy.get_instance()),  # type: ignore
+        },
+    )
+    PrintStyle().debug("Registered middleware for MCP and MCP token")
 
-        printer = PrintStyle()
+    PrintStyle().debug(f"Starting server at {host}:{port}...")
 
-        def signal_handler(sig=None, frame=None):
-            nonlocal tunnel, server, printer
-            with lock:
-                printer.print("Caught signal, stopping server...")
-                if server:
-                    server.shutdown()
-                process.stop_server()
-                if tunnel:
-                    tunnel.stop()
-                    tunnel = None
-                printer.print("Server stopped")
-                sys.exit(0)
+    server = make_server(
+        host=host,
+        port=port,
+        app=app,
+        request_handler=NoRequestLoggingWSGIRequestHandler,
+        threaded=True,
+    )
+    process.set_server(server)
+    server.log_startup()
 
-        signal.signal(signal.SIGINT, signal_handler)
-        signal.signal(signal.SIGTERM, signal_handler)
+    # Start init_a0 in a background thread when server starts
+    # threading.Thread(target=init_a0, daemon=True).start()
+    init_a0()
 
-        process.set_server(server)
-        server.log_startup()
-        server.serve_forever()
-        # Run Flask app
-        # app.run(
-        #     request_handler=NoRequestLoggingWSGIRequestHandler, port=port, host=host
-        # )
-    finally:
-        # Clean up tunnel if it was started
-        if tunnel:
-            tunnel.stop()
+    # run the server
+    server.serve_forever()
+
+
+def init_a0():
+    # initialize contexts and MCP
+    init_chats = initialize.initialize_chats()
+    initialize.initialize_mcp()
+    # start job loop
+    initialize.initialize_job_loop()
+
+    # only wait for init chats, otherwise they would seem to dissapear for a while on restart
+    init_chats.result_sync()
 
 
 # run the internal server
